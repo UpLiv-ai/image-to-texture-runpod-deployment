@@ -1,0 +1,11 @@
+# deps-conda.yml
+name: matpal
+channels:
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.10
+  - pytorch==1.13.1
+  - torchvision==0.14.1
+  - pytorch-cuda=11.7
+  - pip<24.1
