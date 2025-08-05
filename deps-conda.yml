@@ -9,3 +9,4 @@ dependencies:
   - torchvision==0.14.1
   - pytorch-cuda=11.7
   - pip<24.1
+  - numpy=1.26.4   # <-- The crucial fix
