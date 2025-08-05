@@ -1,12 +1,10 @@
-# handler.py (Definitive Final Version)
 import base64
 import torch
 from PIL import Image
-import numpy as np
 from io import BytesIO
 import runpod
 import uuid
-import tempfile
+timport tempfile
 from pathlib import Path
 import pytorch_lightning as pl
 from diffusers import StableDiffusionPipeline
@@ -17,102 +15,115 @@ import os
 # Add the MaterialPalette directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'MaterialPalette'))
 
-import concept.config as concept_config
-from concept import invert as concept_invert
 from concept import infer as concept_infer
 from capture import get_data as capture_get_data
 from capture import get_inference_module as capture_get_inference_module
 
-# Global dictionary to hold all our models
+# Global dict to hold models
 MODELS = {}
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def init():
-    """Initialize all models and load them into memory."""
-    if not MODELS:
-        print("Initializing models...")
-        matpal_checkpoint = '/workspace/model.ckpt'
-        if not os.path.exists(matpal_checkpoint):
-            raise FileNotFoundError(f"Decomposition model checkpoint not found at {matpal_checkpoint}")
-        MODELS["decomposer"] = capture_get_inference_module(pt=matpal_checkpoint)
+    """Load decomposition model & SD pipeline once."""
+    if MODELS:
+        return
 
-        base_model_id = "runwayml/stable-diffusion-v1-5"
-        sd_pipeline = StableDiffusionPipeline.from_pretrained(base_model_id, torch_dtype=torch.float16, safety_checker=None)
-        MODELS["sd_pipeline"] = sd_pipeline.to(DEVICE)
+    # Load PBR decomposer
+    decomposer_ckpt = '/workspace/model.ckpt'
+    if not os.path.exists(decomposer_ckpt):
+        raise FileNotFoundError(f"Decomposer checkpoint not found at {decomposer_ckpt}")
+    MODELS["decomposer"] = capture_get_inference_module(pt=decomposer_ckpt)
 
-        print("All models loaded.")
-    print("Model initialization successful.")
+    # Load Stable Diffusion base pipeline
+    base_model_id = "runwayml/stable-diffusion-v1-5"
+    sd_pipe = StableDiffusionPipeline.from_pretrained(
+        base_model_id,
+        torch_dtype=torch.float16,
+        safety_checker=None
+    )
+    MODELS["sd_pipeline"] = sd_pipe.to(DEVICE)
+
+    print("✓ Models initialized.")
+
 
 def handler(job):
-    """The main handler function for the RunPod endpoint."""
-    job_id = job.get("id", uuid.uuid4())
-    job_input = job.get("input", {})
+    job_id  = job.get("id", uuid.uuid4())
+    payload = job.get("input", {})
 
+    # Lazy init
     if not MODELS:
         init()
 
-    image_b64 = job_input.get("image")
+    image_b64 = payload.get("image")
     if not image_b64:
-        return {"error": "No image provided in the input."}
+        return {"error": "No 'image' field supplied."}
 
-    with tempfile.TemporaryDirectory() as temp_dir_str:
-        base_dir = Path(temp_dir_str)
-        region_dir = base_dir / "region_0"
-        mask_dir = region_dir / "masks"
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        # Prepare input folders
+        region_dir = tmp_dir / "region_0"
+        mask_dir   = region_dir / "masks"
         mask_dir.mkdir(parents=True, exist_ok=True)
 
-        image_data = base64.b64decode(image_b64)
-        image = Image.open(BytesIO(image_data)).convert("RGB")
-        image.save(region_dir / "image.png")
+        # Decode and save input image
+        img_data = base64.b64decode(image_b64)
+        img = Image.open(BytesIO(img_data)).convert("RGB")
+        img.save(region_dir / "image.png")
+        # Full-white mask
+        Image.new("L", img.size, 255).save(mask_dir / "000.png")
 
-        mask = Image.new("L", image.size, 255)
-        mask.save(mask_dir / "000.png")
+        # Create an empty LoRA directory (no .safetensors) to force base weights
+        empty_lora = tmp_dir / "empty_lora"
+        empty_lora.mkdir()
 
         try:
-            # STEP 1: INVERT CONCEPT (Train the LoRA)
-            print(f"[{job_id}] Step 1: Inverting concept to create LoRA...")
-            lora_path = concept_invert(region_dir, pipeline=MODELS["sd_pipeline"])
-            print(f"[{job_id}] LoRA created at: {lora_path}")
-            torch.cuda.empty_cache()
+            # STEP 1: Use base weights only (no LoRA)
+            print(f"[{job_id}] Using base weights (no LoRA)")
 
-            # STEP 2: INFER (Generate Texture Views)
-            print(f"[{job_id}] Step 2: Generating texture views using LoRA...")
-            concept_infer(lora_path, renorm=True)
+            # STEP 2: Generate texture views
+            concept_infer(
+                empty_lora,
+                renorm=True,
+                pipeline=MODELS["sd_pipeline"]
+            )
             print(f"[{job_id}] Texture views generated.")
 
-            # STEP 3: DECOMPOSE (Create PBR Maps)
-            print(f"[{job_id}] Step 3: Decomposing views into PBR maps...")
-            # --- FIX 1: Get the DataModule wrapper ---
-            data_module = capture_get_data(predict_dir=lora_path, predict_ds='renorm')
+            # STEP 3: Decompose into PBR maps
+            data_mod = capture_get_data(predict_dir=empty_lora, predict_ds='renorm')
+            trainer  = pl.Trainer(
+                accelerator='gpu',
+                devices=1,
+                precision=16,
+                logger=False
+            )
+            trainer.predict(MODELS["decomposer"], dataloaders=data_mod.predict_dataloader())
 
-            trainer = pl.Trainer(accelerator='gpu', devices=1, precision=16, logger=False)
-
-            # --- FIX 2: Give the Trainer the specific dataloader it needs ---
-            trainer.predict(MODELS["decomposer"], dataloaders=data_module.predict_dataloader())
-
-            output_path = lora_path / "renorm" / "predictions"
-            pbr_maps = {
-                "albedo": list(output_path.glob("*_albedo.png"))[0],
-                "normal": list(output_path.glob("*_normal.png"))[0],
-                "roughness": list(output_path.glob("*_roughness.png"))[0],
-                "metallic": list(output_path.glob("*_metallic.png"))[0]
+            # Collect outputs
+            out_dir = empty_lora / "renorm" / "predictions"
+            maps = {
+                "albedo":    list(out_dir.glob("*_albedo.png"))[0],
+                "normal":    list(out_dir.glob("*_normal.png"))[0],
+                "roughness": list(out_dir.glob("*_roughness.png"))[0],
+                "metallic":  list(out_dir.glob("*_metallic.png"))[0],
             }
-            print(f"[{job_id}] PBR maps generated at: {output_path}")
 
-            def to_b64(img_path):
-                with open(img_path, "rb") as f:
-                    return base64.b64encode(f.read()).decode("utf-8")
+            # Encode results to base64
+            def to_b64(path: Path):
+                return base64.b64encode(path.read_bytes()).decode('ascii')
 
             return {
-                "albedo_b64": to_b64(pbr_maps["albedo"]),
-                "normals_b64": to_b64(pbr_maps["normal"]),
-                "roughness_b64": to_b64(pbr_maps["roughness"]),
-                "metallic_b64": to_b64(pbr_maps["metallic"]),
+                "albedo_b64":    to_b64(maps["albedo"]),
+                "normals_b64":   to_b64(maps["normal"]),
+                "roughness_b64": to_b64(maps["roughness"]),
+                "metallic_b64":  to_b64(maps["metallic"]),
             }
 
         except Exception as e:
             import traceback
-            return {"error": f"An error occurred: {e}", "traceback": traceback.format_exc()}
+            return {
+                "error":     str(e),
+                "traceback": traceback.format_exc().splitlines()[-10:]
+            }
 
 if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})
