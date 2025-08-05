@@ -1,6 +1,5 @@
 #
-# handler_matpal_sam2.py
-# Serverless handler for the integrated Material Palette and SAM 2 pipeline.
+# handler.py (Simplified for Material Palette only)
 #
 
 import os
@@ -14,53 +13,32 @@ import numpy as np
 import torch
 import runpod
 
-# --- Add repository paths to the system path ---
-# This allows us to import modules directly from the cloned repositories.
-sys.path.append('/app/MaterialPalette')
-sys.path.append('/app/sam2')
+# --- Add MaterialPalette path to the system path ---
+sys.path.append('/workspace')
 
 # --- Import model-specific modules ---
-from sam2.build_sam import build_sam2
-from sam2.sam2_image_predictor import SAM2ImagePredictor
 from concept import crop as concept_crop, invert as concept_invert, infer as concept_infer
 from capture import get_data as capture_get_data, get_inference_module as capture_get_inference_module
 from pytorch_lightning import Trainer
 
 # --- Global State for Models ---
-# This dictionary will hold the initialized models. By defining it in the global
-# scope, the models are loaded only once when the worker starts (cold start),
-# and are reused for subsequent requests (warm starts), dramatically improving performance.
 MODELS = {
-    "sam_predictor": None,
     "matpal_decomposer": None,
     "pl_trainer": None
 }
 
 def init():
     """
-    Initializes all models and stores them in the global MODELS dictionary.
+    Initializes the Material Palette model and stores it in the global MODELS dictionary.
     This function is called only once on worker startup.
     """
     global MODELS
     
-    print("Initializing models...")
+    print("Initializing Material Palette model...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 1. Initialize SAM 2 Predictor
-    print("Loading SAM 2 model...")
-    sam_checkpoint = "/runpod-volume/sam2/sam2_hiera_large.pt"
-    sam_model_cfg = "/app/sam2/configs/sam2/sam2_hiera_l.yaml"
-    
-    if not os.path.exists(sam_checkpoint):
-        raise FileNotFoundError(f"SAM 2 checkpoint not found at {sam_checkpoint}. Ensure it's on the network volume.")
-        
-    sam_model = build_sam2(sam_model_cfg, sam_checkpoint).to(device)
-    MODELS["sam_predictor"] = SAM2ImagePredictor(sam_model)
-    print("SAM 2 model loaded.")
-
-    # 2. Initialize Material Palette Decomposition Model
-    print("Loading Material Palette decomposition model...")
-    matpal_checkpoint = "/runpod-volume/material-palette/model.ckpt"
+    # 1. Initialize Material Palette Decomposition Model
+    matpal_checkpoint = "/workspace/model.ckpt"
 
     if not os.path.exists(matpal_checkpoint):
         raise FileNotFoundError(f"Material Palette checkpoint not found at {matpal_checkpoint}. Ensure it's on the network volume.")
@@ -68,12 +46,11 @@ def init():
     MODELS["matpal_decomposer"] = capture_get_inference_module(pt=matpal_checkpoint).to(device)
     print("Material Palette model loaded.")
 
-    # 3. Initialize PyTorch Lightning Trainer for decomposition
-    # We configure the trainer once and reuse it.
+    # 2. Initialize PyTorch Lightning Trainer for decomposition
     MODELS["pl_trainer"] = Trainer(accelerator='gpu', devices=1, precision=16)
     print("PyTorch Lightning Trainer initialized.")
     
-    print("All models initialized successfully.")
+    print("Model initialization successful.")
 
 
 def image_to_base64(image):
@@ -85,10 +62,10 @@ def image_to_base64(image):
 def handler(job):
     """
     The main handler function for the serverless endpoint.
-    Orchestrates the SAM 2 -> Material Palette pipeline.
+    Orchestrates the Material Palette pipeline.
     """
-    # Ensure models are loaded
-    if MODELS["sam_predictor"] is None:
+    # Ensure model is loaded
+    if MODELS["matpal_decomposer"] is None:
         init()
 
     job_input = job['input']
@@ -96,81 +73,55 @@ def handler(job):
     # --- Input Validation ---
     if 'image' not in job_input:
         return {"error": "Missing 'image' (base64 encoded) in input."}
-    if 'points' not in job_input:
-        return {"error": "Missing 'points' for SAM prompt in input."}
 
     # --- Create a temporary directory for this job ---
-    # This is crucial for isolating job data and ensuring the file structure
-    # required by Material Palette is met.
     job_id = str(uuid.uuid4())
     temp_dir = os.path.join("/tmp", job_id)
     masks_dir = os.path.join(temp_dir, "masks")
     os.makedirs(masks_dir, exist_ok=True)
     
+    # Use a generic name for the image and mask
     image_path = os.path.join(temp_dir, "input_image.png")
-    mask_path = os.path.join(masks_dir, "sam_mask.png")
+    mask_path = os.path.join(masks_dir, "full_mask.png")
 
     try:
-        # --- Step 1: Decode image and prepare for SAM 2 ---
+        # --- Step 1: Decode image and create a full-image mask ---
         image_data = base64.b64decode(job_input['image'])
         image = Image.open(BytesIO(image_data)).convert("RGB")
         image.save(image_path)
         
-        # SAM expects image as a numpy array
-        image_np = np.array(image)
-        
-        # SAM expects prompts as numpy arrays
-        input_points = np.array(job_input['points'])
-        input_labels = np.array([p for p in input_points])
-        input_points = input_points[:, :2] # Keep only x, y
-
-        # --- Step 2: Run SAM 2 to get the mask ---
-        print(f"[{job_id}] Running SAM 2 prediction...")
-        predictor = MODELS["sam_predictor"]
-        
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            predictor.set_image(image_np)
-            masks, _, _ = predictor.predict(
-                point_coords=input_points,
-                point_labels=input_labels,
-                multimask_output=False, # We want the single best mask
-            )
-        
-        # The output mask is a boolean numpy array. Convert to an image.
-        mask_np = masks
-        mask_image = Image.fromarray(mask_np)
+        # Create a white mask of the same size as the input image.
+        # This tells Material Palette to use the entire image.
+        width, height = image.size
+        mask_image = Image.new('L', (width, height), 255) # 'L' for grayscale, 255 for white
         mask_image.save(mask_path)
-        print(f"[{job_id}] SAM 2 mask generated and saved to {mask_path}")
+        print(f"[{job_id}] Generated full-image mask and saved to {mask_path}")
 
-        # --- Step 3: Run Material Palette Pipeline Programmatically ---
+        # --- Step 2: Run Material Palette Pipeline Programmatically ---
         print(f"[{job_id}] Starting Material Palette pipeline...")
 
-        # 3a. Crop the region based on the mask (concept.crop)
-        # This function expects a directory path and finds the image and mask inside.
+        # 2a. Crop the region based on the mask (concept.crop)
         regions = concept_crop(temp_dir)
         print(f"[{job_id}] Cropped regions extracted.")
 
-        # 3b. Invert and Infer for each region (concept.invert, concept.infer)
-        # This generates the texture views.
+        # 2b. Invert and Infer for each region (concept.invert, concept.infer)
         for region in regions.iterdir():
             print(f"[{job_id}] Inverting concept for region: {region.name}")
             lora = concept_invert(region)
             print(f"[{job_id}] Generating texture for region: {region.name}")
             concept_infer(lora, renorm=True)
 
-        # 3c. Decompose the generated textures (capture module)
+        # 2c. Decompose the generated textures (capture module)
         print(f"[{job_id}] Preparing data for decomposition...")
-        # The 'sd' dataset points to the generated textures inside the temp_dir
         data_loader = capture_get_data(predict_dir=temp_dir, predict_ds='sd')
         
         print(f"[{job_id}] Running decomposition model...")
         MODELS["pl_trainer"].predict(MODELS["matpal_decomposer"], data_loader)
         print(f"[{job_id}] Decomposition complete.")
 
-        # --- Step 4: Collect and encode output images ---
+        # --- Step 3: Collect and encode output images ---
         output_dir = os.path.join(temp_dir, "lightning_logs/version_0/predict/sd/0/")
         
-        # Find the output files (albedo, normals, roughness)
         albedo_path = os.path.join(output_dir, "albedo.png")
         normals_path = os.path.join(output_dir, "normals.png")
         roughness_path = os.path.join(output_dir, "roughness.png")
@@ -178,7 +129,6 @@ def handler(job):
         if not all(os.path.exists(p) for p in [albedo_path, normals_path, roughness_path]):
             return {"error": "Decomposition did not produce the expected output files."}
 
-        # Read and base64 encode the results
         albedo_img = Image.open(albedo_path)
         normals_img = Image.open(normals_path)
         roughness_img = Image.open(roughness_path)
@@ -190,14 +140,12 @@ def handler(job):
         }
 
     except Exception as e:
-        # Return any errors that occur during the process
         return {"error": f"An error occurred: {str(e)}"}
     finally:
         # --- Cleanup: Always remove the temporary directory ---
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
             print(f"[{job_id}] Cleaned up temporary directory: {temp_dir}")
-
 
 # Start the RunPod serverless worker
 runpod.serverless.start({"handler": handler})
