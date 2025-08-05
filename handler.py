@@ -13,8 +13,8 @@ import numpy as np
 import torch
 import runpod
 
-# --- Add MaterialPalette path to the system path ---
-sys.path.append('/workspace')
+# Add the MaterialPalette directory to the Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), 'MaterialPalette'))
 
 # --- Import model-specific modules ---
 from concept import crop as concept_crop, invert as concept_invert, infer as concept_infer
