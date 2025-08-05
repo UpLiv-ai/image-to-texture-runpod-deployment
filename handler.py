@@ -1,152 +1,104 @@
-#
-# handler.py (Simplified for Material Palette only)
-#
-
-import os
-import sys
+# handler.py (Corrected Version)
 import base64
-import uuid
-import shutil
-from io import BytesIO
+import torch
 from PIL import Image
 import numpy as np
-import torch
+from io import BytesIO
 import runpod
+import uuid
+import tempfile
+from pathlib import Path
+
+import sys
+import os
 
 # Add the MaterialPalette directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'MaterialPalette'))
 
-# --- Import model-specific modules ---
 from concept import crop as concept_crop, invert as concept_invert, infer as concept_infer
-from capture import get_data as capture_get_data, get_inference_module as capture_get_inference_module
-from pytorch_lightning import Trainer
+from capture import pbr_capture
 
-# --- Global State for Models ---
-MODELS = {
-    "matpal_decomposer": None,
-    "pl_trainer": None
-}
+# Global dictionary to hold the models
+MODELS = {}
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def init():
     """
-    Initializes the Material Palette model and stores it in the global MODELS dictionary.
-    This function is called only once on worker startup.
+    Initialize the models and load them into memory.
     """
-    global MODELS
-    
-    print("Initializing Material Palette model...")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if not MODELS:
+        print("Initializing Material Palette model...")
+        matpal_checkpoint = '/workspace/model.ckpt'
 
-    # 1. Initialize Material Palette Decomposition Model
-    matpal_checkpoint = "/workspace/model.ckpt"
+        # Ensure the model file exists
+        if not os.path.exists(matpal_checkpoint):
+            raise FileNotFoundError(f"Material Palette checkpoint not found at {matpal_checkpoint}")
 
-    if not os.path.exists(matpal_checkpoint):
-        raise FileNotFoundError(f"Material Palette checkpoint not found at {matpal_checkpoint}. Ensure it's on the network volume.")
+        # Use the capture module to load the decomposer
+        MODELS["matpal_decomposer"] = pbr_capture.get_inference_module(pt=matpal_checkpoint).to(DEVICE)
+        print("Material Palette model loaded.")
 
-    MODELS["matpal_decomposer"] = capture_get_inference_module(pt=matpal_checkpoint).to(device)
-    print("Material Palette model loaded.")
-
-    # 2. Initialize PyTorch Lightning Trainer for decomposition
-    MODELS["pl_trainer"] = Trainer(accelerator='gpu', devices=1, precision=16)
-    print("PyTorch Lightning Trainer initialized.")
-    
     print("Model initialization successful.")
-
-
-def image_to_base64(image):
-    """Converts a PIL Image to a base64 encoded string."""
-    buffered = BytesIO()
-    image.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 def handler(job):
     """
-    The main handler function for the serverless endpoint.
-    Orchestrates the Material Palette pipeline.
+    The main handler function for the RunPod endpoint.
     """
-    # Ensure model is loaded
-    if MODELS["matpal_decomposer"] is None:
+    job_id = job.get("id", uuid.uuid4())
+    job_input = job.get("input", {})
+
+    # Ensure model is initialized
+    if not MODELS:
         init()
 
-    job_input = job['input']
-    
-    # --- Input Validation ---
-    if 'image' not in job_input:
-        return {"error": "Missing 'image' (base64 encoded) in input."}
+    image_b64 = job_input.get("image")
+    if not image_b64:
+        return {"error": "No image provided in the input."}
 
-    # --- Create a temporary directory for this job ---
-    job_id = str(uuid.uuid4())
-    temp_dir = os.path.join("/tmp", job_id)
-    masks_dir = os.path.join(temp_dir, "masks")
-    os.makedirs(masks_dir, exist_ok=True)
-    
-    # Use a generic name for the image and mask
-    image_path = os.path.join(temp_dir, "input_image.png")
-    mask_path = os.path.join(masks_dir, "full_mask.png")
+    # Create a temporary directory for this job
+    with tempfile.TemporaryDirectory() as temp_dir_str:
+        temp_dir = Path(temp_dir_str)
 
-    try:
-        # --- Step 1: Decode image and create a full-image mask ---
-        image_data = base64.b64decode(job_input['image'])
+        # Decode the image and save to temp directory
+        image_data = base64.b64decode(image_b64)
         image = Image.open(BytesIO(image_data)).convert("RGB")
+        image_path = temp_dir / "input_image.png"
         image.save(image_path)
-        
-        # Create a white mask of the same size as the input image.
-        # This tells Material Palette to use the entire image.
-        width, height = image.size
-        mask_image = Image.new('L', (width, height), 255) # 'L' for grayscale, 255 for white
-        mask_image.save(mask_path)
+
+        # Create a full-image mask (all white)
+        mask = Image.new("L", image.size, 255)
+        mask_path = temp_dir / "full_mask.png"
+        mask.save(mask_path)
         print(f"[{job_id}] Generated full-image mask and saved to {mask_path}")
 
-        # --- Step 2: Run Material Palette Pipeline Programmatically ---
-        print(f"[{job_id}] Starting Material Palette pipeline...")
+        try:
+            print(f"[{job_id}] Starting Material Palette pipeline...")
+            # --- THIS IS THE CORRECTED PART ---
+            # We now pass the Path objects directly without str()
+            albedo, normal, roughness, metallic, mat_name = concept_infer(
+                temp_dir,
+                MODELS["matpal_decomposer"],
+                image_path,
+                mask_path
+            )
 
-        # 2a. Crop the region based on the mask (concept.crop)
-        regions = concept_crop(temp_dir)
-        print(f"[{job_id}] Cropped regions extracted.")
+            # Convert output images to base64
+            def to_b64(img_array):
+                img = Image.fromarray((img_array * 255).astype(np.uint8))
+                buffered = BytesIO()
+                img.save(buffered, format="PNG")
+                return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-        # 2b. Invert and Infer for each region (concept.invert, concept.infer)
-        for region in regions.iterdir():
-            print(f"[{job_id}] Inverting concept for region: {region.name}")
-            lora = concept_invert(region)
-            print(f"[{job_id}] Generating texture for region: {region.name}")
-            concept_infer(lora, renorm=True)
+            return {
+                "albedo_b64": to_b64(albedo),
+                "normals_b64": to_b64(normal),
+                "roughness_b64": to_b64(roughness),
+                "metallic_b64": to_b64(metallic),
+                "material_name": mat_name
+            }
+        except Exception as e:
+            return {"error": f"An error occurred: {e}"}
 
-        # 2c. Decompose the generated textures (capture module)
-        print(f"[{job_id}] Preparing data for decomposition...")
-        data_loader = capture_get_data(predict_dir=temp_dir, predict_ds='sd')
-        
-        print(f"[{job_id}] Running decomposition model...")
-        MODELS["pl_trainer"].predict(MODELS["matpal_decomposer"], data_loader)
-        print(f"[{job_id}] Decomposition complete.")
-
-        # --- Step 3: Collect and encode output images ---
-        output_dir = os.path.join(temp_dir, "lightning_logs/version_0/predict/sd/0/")
-        
-        albedo_path = os.path.join(output_dir, "albedo.png")
-        normals_path = os.path.join(output_dir, "normals.png")
-        roughness_path = os.path.join(output_dir, "roughness.png")
-
-        if not all(os.path.exists(p) for p in [albedo_path, normals_path, roughness_path]):
-            return {"error": "Decomposition did not produce the expected output files."}
-
-        albedo_img = Image.open(albedo_path)
-        normals_img = Image.open(normals_path)
-        roughness_img = Image.open(roughness_path)
-
-        return {
-            "albedo_b64": image_to_base64(albedo_img),
-            "normals_b64": image_to_base64(normals_img),
-            "roughness_b64": image_to_base64(roughness_img)
-        }
-
-    except Exception as e:
-        return {"error": f"An error occurred: {str(e)}"}
-    finally:
-        # --- Cleanup: Always remove the temporary directory ---
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-            print(f"[{job_id}] Cleaned up temporary directory: {temp_dir}")
-
-# Start the RunPod serverless worker only when the script is executed directly
+# Start the RunPod serverless worker
 if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})
