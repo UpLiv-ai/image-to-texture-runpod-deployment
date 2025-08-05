@@ -147,5 +147,6 @@ def handler(job):
             shutil.rmtree(temp_dir)
             print(f"[{job_id}] Cleaned up temporary directory: {temp_dir}")
 
-# Start the RunPod serverless worker
-runpod.serverless.start({"handler": handler})
+# Start the RunPod serverless worker only when the script is executed directly
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})
