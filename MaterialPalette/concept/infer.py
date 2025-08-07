@@ -25,6 +25,7 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--renorm', action="store_true", default=False)
     parser.add_argument('--num_inference_steps', type=int, default=50)
+    parser.add_argument('--base_model', type=str, default=None, help="local path to SD checkpoint")
     args = parser.parse_args()
     return args
 
@@ -116,7 +117,7 @@ def main(args):
 
         token = 'azertyuiop'
         print(f'loading LoRA with token {token}')
-        pipe = get_lora_sd_pipeline(ckpt_dir=Path(args.path))
+        pipe = get_lora_sd_pipeline(ckpt_dir=Path(args.path), base_model_name_or_path=args.base_model)
     else:
         token = args.token
         pipe = get_vanilla_sd_pipeline()
@@ -394,7 +395,7 @@ def main(args):
 
     return fname
 
-def infer(path, outdir=None, stitch_mode='wmean', renorm=False, resolution=1024, seed=1, prompt='p1', num_inference_steps=50):
+def infer(path, outdir=None, stitch_mode='wmean', renorm=False, resolution=1024, seed=1, prompt='p1', num_inference_steps=50, base_model=None):
     return main(Namespace(
         path=path,
         outdir=outdir,
@@ -404,7 +405,8 @@ def infer(path, outdir=None, stitch_mode='wmean', renorm=False, resolution=1024,
         stitch_mode=stitch_mode,
         resolution=resolution,
         seed=seed,
-        num_inference_steps=num_inference_steps))
+        num_inference_steps=num_inference_steps,
+        base_model=base_model))
 
 if __name__ == "__main__":
     args = parse_args()
