@@ -4,11 +4,11 @@ from pathlib import Path
 # --- Configuration ---
 # List your 5 source JPEG/JPG/PNG images here
 source_images = [
-    "test_image_1.JPG",
+    "test_image_1.png",
     "test_image_2.png",
-    "test_image_3.JPG",
+    "test_image_3.png",
     "test_image_4.png",
-    "test_image_5.JPG",
+    "test_image_5.jpeg",
 ]
 
 # The parent directory where the prepared data folders will be created
