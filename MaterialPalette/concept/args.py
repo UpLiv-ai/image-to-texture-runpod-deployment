@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from argparse import ArgumentParser
 
 
@@ -12,8 +13,9 @@ def get_argparse_defaults(parser):
 
 def parse_args(return_defaults=False):
     parser = ArgumentParser()
+    BASE_MODEL_PATH = Path('/workspace/models/sd-v1-5')
 
-    parser.add_argument('--pretrained_model_name_or_path', type=str, default='runwayml/stable-diffusion-v1-5',
+    parser.add_argument('--pretrained_model_name_or_path', type=str, default=BASE_MODEL_PATH,
         help='Path to pretrained model or model identifier from huggingface.co/models.')
 
     parser.add_argument('--revision', type=str, default=None, required=False,
