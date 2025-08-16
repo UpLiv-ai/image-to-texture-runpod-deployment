@@ -9,6 +9,8 @@ source_images = [
     "test_image_3.png",
     "test_image_4.png",
     "test_image_5.jpeg",
+    "test_image_6.png",
+    "test_image_7.jpeg",
 ]
 
 # The parent directory where the prepared data folders will be created

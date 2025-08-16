@@ -41,9 +41,11 @@ def load_models(args):
         text_encoder = get_peft_model(text_encoder, config)
         text_encoder.print_trainable_parameters()
 
+    # Replace the old VAE loading logic with this:
+    vae_path = "/workspace/models/sd-vae-ft-mse"
     vae = AutoencoderKL.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="vae",
+        vae_path,
+        local_files_only=True,
         revision=args.revision)
     vae.requires_grad_(False)
 

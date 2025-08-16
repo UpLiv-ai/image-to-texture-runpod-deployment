@@ -63,7 +63,17 @@ def get_lora_sd_pipeline(
     ckpt_dir, base_model_name_or_path=None, dtype=torch.float16, device="cuda", adapter_name="default"
 ):
     from peft import PeftModel, LoraConfig
-    from diffusers import StableDiffusionPipeline
+    from diffusers import StableDiffusionPipeline, AutoencoderKL
+
+    # Define the path to your local VAE copy
+    vae_path = "/workspace/models/sd-vae-ft-mse"
+    
+    # Load the new VAE
+    vae = AutoencoderKL.from_pretrained(
+        vae_path,
+        torch_dtype=dtype,
+        local_files_only=True,
+    )
 
     unet_sub_dir = os.path.join(ckpt_dir, "unet")
     text_encoder_sub_dir = os.path.join(ckpt_dir, "text_encoder")
@@ -77,6 +87,7 @@ def get_lora_sd_pipeline(
 
     pipe = StableDiffusionPipeline.from_pretrained(
         base_model_name_or_path,
+        vae=vae,
         torch_dtype=dtype,
         local_files_only=True,
         safety_checker=None,
@@ -128,7 +139,7 @@ def main(args):
     prompt = dict(
         p1='top view realistic texture of {}',
         p2='top view realistic {} texture',
-        p3='high resolution realistic {} texture in top view',
+        p3='masterpiece, best quality, a perfectly uniform grid of clean, white carrara marble hexagonal tiles, subtle and light gray veining, sharp and consistent grout lines, top-down orthographic view, no shadows',
         p4='realistic {} texture in top view',
     )[args.prompt]
     print(f'{args.prompt} => {prompt}')
@@ -136,7 +147,7 @@ def main(args):
     prompt = prompt.format(token)
 
     # negative_prompt = "lowres, error, cropped, worst quality, low quality, jpeg artifacts, out of frame, watermark, signature, illustration, painting, drawing, art, sketch"
-    negative_prompt = ""
+    negative_prompt = "blurry, merged tiles, missing tiles, broken grout, splotchy, noisy, chaotic texture, warped grid, distorted, discolored, ugly, jpeg artifacts, bad art, worst quality, low quality"
     generator = torch.Generator("cuda").manual_seed(args.seed)
     random.seed(args.seed)
 
@@ -162,7 +173,7 @@ def main(args):
     k= (args.resolution//512)
 
     num_images_per_prompt=1
-    guidance_scale=7.5
+    guidance_scale=12.0
     # guidance_scale=1.0
 
     callback_steps=1
@@ -204,7 +215,7 @@ def main(args):
 
     # 3. Encode input prompt
     text_encoder_lora_scale = (
-        cross_attention_kwargs.get("scale", None) if cross_attention_kwargs is not None else None
+        cross_attention_kwargs.get("scale", 0.8) if cross_attention_kwargs is not None else None
     )
     prompt_embeds = pipe._encode_prompt(
         prompt,
@@ -237,50 +248,49 @@ def main(args):
     # 6. Prepare extra step kwargs.
     extra_step_kwargs = pipe.prepare_extra_step_kwargs(generator, eta)
 
-    # 7. Denoising loop
+    # --- START OF CORRECTED DENOISING LOOP ---
+    
+    refiner_switch_step = int(args.num_inference_steps * 0.6)
     num_warmup_steps = len(timesteps) - num_inference_steps * pipe.scheduler.order
+
     with pipe.progress_bar(total=num_inference_steps) as progress_bar:
         for i, t in enumerate(timesteps):
-            # expand the latents if we are doing classifier free guidance
             latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
             latent_model_input = pipe.scheduler.scale_model_input(latent_model_input, t)
 
-            # roll noise
             kx, ky = get_roll(latent_model_input)
             latent_model_input = patch(latent_model_input, k)
             latent_model_input = latent_model_input.roll((kx, ky), dims=(2,3))
             latent_model_input = unpatch(latent_model_input, k)
 
-            # split in two for inference
-            noise_pred = []
-            chunk_size = len(latent_model_input)//16 or 1
-            for latent_chunk, prompt_chunk \
-                in zip(latent_model_input.chunk(chunk_size), prompt_embeds.chunk(chunk_size)):
-                # predict the noise residual
-                res = pipe.unet(latent_chunk, t, encoder_hidden_states=prompt_chunk)
-                noise_pred.append(res.sample)
-            noise_pred = torch.cat(noise_pred)
-
-            # noise unrolling
-            noise_pred = patch(noise_pred, k)
+            # Determine which UNet to use for this step
+            # STAGE 1: Use the full LoRA-wrapped UNet
+            if i < refiner_switch_step:
+                unet_to_use = pipe.unet
+            # STAGE 2: Bypass the LoRA and use the original base UNet
+            else:
+                unet_to_use = pipe.unet.base_model
+            
+            # Predict the noise residual using the selected UNet
+            noise_pred_sample = unet_to_use(latent_model_input, t, encoder_hidden_states=prompt_embeds).sample
+            
+            noise_pred = patch(noise_pred_sample, k)
             noise_pred = noise_pred.roll((-kx, -ky), dims=(2,3))
             noise_pred = unpatch(noise_pred, k)
-
-            # perform guidance
+            
             if do_classifier_free_guidance:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
             if do_classifier_free_guidance and guidance_rescale > 0.0:
-                # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
                 noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=guidance_rescale)
 
-            # compute the previous noisy sample x_t -> x_t-1
             latents = pipe.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
 
-            # call the callback, if provided
             if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % pipe.scheduler.order == 0):
                 progress_bar.update()
+
+    # --- END OF CORRECTED DENOISING LOOP ---
 
 
     if args.resolution == 512:
@@ -347,7 +357,7 @@ def main(args):
         image.save(fname)
 
     elif args.stitch_mode == 'wmean': # weighted average kernel blending
-        p=1
+        p=4
         folded = patch(latents, k)
         folded_padded = F.pad(folded, pad=(p,p,p,p), mode='circular')
         unfolded_padded = unpatch(folded_padded, k, p)
@@ -359,10 +369,25 @@ def main(args):
             image_stack.append(image.sample)
         image_stack = torch.cat(image_stack)
 
-        # lmean = image_stack.mean(dim=(-1,-2), keepdim=True)
-        # gmean = image_stack.mean(dim=(0,2,3), keepdim=True)
-        # image_stack = image_stack*gmean/lmean
+        # --- START OF MODIFICATION ---
+        # Replace the old lmean/gmean logic with this more robust AdaIN block.
 
+        # A small value to prevent division by zero
+        epsilon = 1e-5
+
+        # Calculate mean and std dev for each patch (local stats)
+        lmean = image_stack.mean(dim=(-1, -2), keepdim=True)
+        lstd = image_stack.std(dim=(-1, -2), keepdim=True)
+
+        # Calculate mean and std dev for all patches combined (global stats)
+        gmean = image_stack.mean(dim=(0, 2, 3), keepdim=True)
+        gstd = image_stack.std(dim=(0, 2, 3), keepdim=True)
+
+        # Normalize each patch and then apply the global style (mean and std dev)
+        image_stack = (image_stack - lmean) / (lstd + epsilon) * (gstd + epsilon) + gmean
+        
+        # --- END OF MODIFICATION ---
+        
         ## patch blending
         scale = pipe.vae_scale_factor
         tp = 2*scale*p # total padding
@@ -388,6 +413,7 @@ def main(args):
         out = out_padded[:,:,hp:-hp,hp:-hp] # trim
         image, *_ = pipe.image_processor.postprocess(out, output_type='pil', do_denormalize=[True])
         image.save(fname)
+
 
     if args.renorm:
         from . import renorm
