@@ -1,44 +1,44 @@
-# Use the base image you specified
 FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
 
-# Avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 
-# Install basic dependencies
+# Basic dependencies
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
-        git \
-        wget \
-        bzip2 \
-        libgl1-mesa-glx \
+        git wget bzip2 libgl1-mesa-glx \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Miniconda
 WORKDIR /root
+
+# Download & silently install Miniconda (batch mode, auto-license acceptance)
 RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh && \
-    bash Miniconda3-latest-Linux-x86_64.sh -b && \
+    bash Miniconda3-latest-Linux-x86_64.sh -b -p /root/miniconda3 && \
     rm Miniconda3-latest-Linux-x86_64.sh
 
-# Add conda to PATH
+# Update PATH for conda
 ENV PATH=/root/miniconda3/bin:$PATH
 
-# Clone your repo
+# Initialize Conda for bash (makes conda activate available)
+RUN conda init bash
+
 WORKDIR /app
+
+# Clone your deployment repository
 RUN git clone https://github.com/UpLiv-ai/image-to-texture-runpod-deployment.git .
-    
-# Create conda environment from deps-conda.yml
+
+# Create your designated environment
 RUN conda env create -f deps-conda.yml
 
-# Activate environment by default
-SHELL ["conda", "run", "-n", "matpal", "/bin/bash", "-c"]
+# Make new shell always use the matpal env
+RUN echo "conda activate matpal" >> /root/.bashrc
 
-# Install pip requirements inside conda env
+# Switch default shell to login bash to trigger conda init + auto-activate
+SHELL ["/bin/bash", "--login", "-c"]
+
+# Install pip requirements inside the matpal environment
 RUN pip install -r requirements.txt && \
     pip install scipy runpod
 
-# Copy handler file (if you want to override existing one, otherwise skip)
-COPY handler.py /app/handler.py
-
-# Run handler.py with conda env
-CMD ["conda", "run", "-n", "matpal", "python", "-u", "handler.py"]
+# Ensure your handler runs in the matpal env
+CMD ["python", "-u", "handler.py"]
