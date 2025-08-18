@@ -1,3 +1,4 @@
+# 
 FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -9,33 +10,32 @@ RUN apt-get update -y && \
         git wget bzip2 libgl1-mesa-glx \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /root
-
-# Download & silently install Miniconda (batch mode, auto-license acceptance)
-RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh && \
-    bash Miniconda3-latest-Linux-x86_64.sh -b -p /root/miniconda3 && \
-    rm Miniconda3-latest-Linux-x86_64.sh
-
-# Update PATH for conda
-ENV PATH=/root/miniconda3/bin:$PATH
-
-# Initialize Conda for bash (makes conda activate available)
-RUN conda init bash
-
+# Set WORKDIR before any file operations
 WORKDIR /app
 
-# Create your designated environment
+# Download & install Miniconda
+RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /app/miniconda.sh && \
+    bash /app/miniconda.sh -b -p /opt/conda && \
+    rm /app/miniconda.sh
+
+# Add conda to PATH
+ENV PATH=/opt/conda/bin:$PATH
+
+# Create your designated environment from the YAML file
+COPY deps-conda.yml .
 RUN conda env create -f deps-conda.yml
 
-# Make new shell always use the matpal env
-RUN echo "conda activate matpal" >> /root/.bashrc
+# Copy application code
+COPY . .
 
-# Switch default shell to login bash to trigger conda init + auto-activate
-SHELL ["/bin/bash", "--login", "-c"]
+# Install pip requirements directly into the 'matpal' environment.
+# This is the explicit and reliable way to install packages.
+RUN conda run -n matpal pip install -r requirements.txt && \
+    conda run -n matpal pip install scipy runpod
 
-# Install pip requirements inside the matpal environment
-RUN pip install -r requirements.txt && \
-    pip install scipy runpod
+# Set the ENTRYPOINT to ensure all subsequent commands run within the matpal environment.
+ENTRYPOINT ["conda", "run", "-n", "matpal", "--no-capture-output"]
 
-# Ensure your handler runs in the matpal env
+# The CMD is now appended to the ENTRYPOINT, so the final command will be:
+# conda run -n matpal --no-capture-output python -u handler.py
 CMD ["python", "-u", "handler.py"]
