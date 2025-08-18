@@ -20,8 +20,8 @@ RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -
 # Add conda to PATH
 ENV PATH=/opt/conda/bin:$PATH
 
-# --- FIX: Add this line to bypass the Terms of Service check ---
-RUN conda config --set anaconda_token no
+# --- FIX: Use the correct command to accept the Terms of Service ---
+RUN conda tos accept --override-channels
 
 # Create your designated environment from the YAML file
 COPY deps-conda.yml .
