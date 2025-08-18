@@ -1,4 +1,3 @@
-# 
 FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -21,6 +20,9 @@ RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -
 # Add conda to PATH
 ENV PATH=/opt/conda/bin:$PATH
 
+# --- FIX: Add this line to bypass the Terms of Service check ---
+RUN conda config --set anaconda_token no
+
 # Create your designated environment from the YAML file
 COPY deps-conda.yml .
 RUN conda env create -f deps-conda.yml
@@ -29,13 +31,11 @@ RUN conda env create -f deps-conda.yml
 COPY . .
 
 # Install pip requirements directly into the 'matpal' environment.
-# This is the explicit and reliable way to install packages.
 RUN conda run -n matpal pip install -r requirements.txt && \
     conda run -n matpal pip install scipy runpod
 
 # Set the ENTRYPOINT to ensure all subsequent commands run within the matpal environment.
 ENTRYPOINT ["conda", "run", "-n", "matpal", "--no-capture-output"]
 
-# The CMD is now appended to the ENTRYPOINT, so the final command will be:
-# conda run -n matpal --no-capture-output python -u handler.py
+# The CMD is now appended to the ENTRYPOINT
 CMD ["python", "-u", "handler.py"]
