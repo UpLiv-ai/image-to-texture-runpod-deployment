@@ -78,7 +78,7 @@ def handler(job):
             return {"error": "No 'image' field was supplied in the input."}
 
         # Set processing parameters with defaults, allowing them to be overridden by the job input
-        train_steps = payload.get("train_steps", 50)
+        train_steps = payload.get("train_steps", 800)
         infer_steps = payload.get("infer_steps", 150)
         resolution = payload.get("resolution", 1024)
         prompt_key = payload.get("prompt_key", 'p3') # 'p3' is a predefined high-quality prompt
