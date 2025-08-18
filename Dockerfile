@@ -24,9 +24,6 @@ RUN conda init bash
 
 WORKDIR /app
 
-# Clone your deployment repository
-RUN git clone https://github.com/UpLiv-ai/image-to-texture-runpod-deployment.git .
-
 # Create your designated environment
 RUN conda env create -f deps-conda.yml
 
