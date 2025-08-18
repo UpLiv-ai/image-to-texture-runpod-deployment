@@ -12,7 +12,6 @@ from diffusers import StableDiffusionPipeline
 import sys
 import os
 import traceback
-import time
 
 # Add the MaterialPalette directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'MaterialPalette'))
@@ -150,34 +149,32 @@ def handler(job):
                     patches.append(full_image[y0_:y1, x0_:x1, :])
 
             # Save patches to a dedicated directory for the decomposer
-            # patches_dir = tmp_dir / "patches_for_decomposition"
-            # patches_dir.mkdir()
+            patches_dir = tmp_dir / "patches_for_decomposition"
+            patches_dir.mkdir()
             for i, patch_np in enumerate(patches):
                 patch_img = Image.fromarray((patch_np * 255).astype(np.uint8))
-                patch_img.save(outputs_dir  / f"patch_{i:03d}.png")
+                patch_img.save(patches_dir / f"patch_{i:03d}.png")
             
             # --- Stage 4: Decompose Patches into PBR Maps ---
             print(f"[{job_id}] Decomposing {len(patches)} patches into PBR maps...")
-            data_mod = capture.get_data(predict_dir=input_data_dir, predict_ds='sd')
+            data_mod = capture.get_data(predict_dir=patches_dir, predict_ds='sd')
             
             # Call setup() on the DataModule before using it
             data_mod.setup('predict')
             
-            trainer = pl.Trainer(default_root_dir=outputs_dir, accelerator='gpu', devices=1, precision=16, logger=False)
+            trainer = pl.Trainer(accelerator='gpu', devices=1, precision=16, logger=False)
             trainer.predict(MODELS["decomposer"], dataloaders=data_mod.predict_dataloader())
             
             # --- Stage 5 & 6: Gather and Blend PBR Patches ---
             print(f"[{job_id}] Blending PBR patches into full maps...")
-            predictions_dir = outputs_dir / "predictions"
+            predictions_dir = patches_dir / "predictions"
             albedo_p, rough_p, norm_p = [], [], []
-
-            # time.sleep(1000)  # Pauses execution for 3 seconds
             
             for i in range(len(patches)):
                 base_name = f"patch_{i:03d}"
-                albedo_p.append(np.array(Image.open(outputs_dir / f"{base_name}_albedo.png"), np.float32) / 255.0)
-                rough_p.append(np.array(Image.open(outputs_dir / f"{base_name}_roughness.png"), np.float32) / 255.0)
-                norm_p.append(np.array(Image.open(outputs_dir / f"{base_name}_normals.png"), np.float32) / 255.0)
+                albedo_p.append(np.array(Image.open(predictions_dir / f"{base_name}_albedo.png"), np.float32) / 255.0)
+                rough_p.append(np.array(Image.open(predictions_dir / f"{base_name}_roughness.png"), np.float32) / 255.0)
+                norm_p.append(np.array(Image.open(predictions_dir / f"{base_name}_normal.png"), np.float32) / 255.0)
 
             w = np.minimum(np.linspace(0, 1, tile_size), np.linspace(0, 1, tile_size)[::-1])
             window = np.outer(w, w)[..., np.newaxis] # Add channel dimension for broadcasting
@@ -226,7 +223,7 @@ def handler(job):
 
 if __name__ == "__main__":
     # This block allows for local testing of the handler without a RunPod server.
-    # Usage: python handler.py path/to/your/image.png ["An optional custom prompt with {} placeholder"]
+    # Usage: python handler.py path/to/your/image.png
     if len(sys.argv) > 1:
         image_path_str = sys.argv[1]
         image_path = Path(image_path_str)
@@ -234,20 +231,7 @@ if __name__ == "__main__":
         with open(image_path, "rb") as f:
             b64_img = base64.b64encode(f.read()).decode('utf-8')
         
-        # Start building the payload with the required image
-        job_payload = {'image': b64_img}
-        
-        # NEW: Check if a custom prompt string was passed as the second argument
-        if len(sys.argv) > 2:
-            custom_prompt = sys.argv[2]
-            job_payload['prompt_key'] = custom_prompt
-            print(f"--- Testing with Custom Prompt ---")
-            print(f'"{custom_prompt}"')
-        else:
-            print("--- Testing with Default Prompt ('p3') ---")
-
-        # Create the final job input dictionary
-        job_input = {'input': job_payload}
+        job_input = {'input': {'image': b64_img}}
         result = handler(job_input)
         
         if 'error' in result:
@@ -268,6 +252,6 @@ if __name__ == "__main__":
                 with open(save_path, "wb") as f:
                     f.write(img_data)
                 print(f" ✓ Saved {save_path}")
-else:
-    # This starts the RunPod serverless worker
-    runpod.serverless.start({"handler": handler})
+    else:
+        # This starts the RunPod serverless worker
+        runpod.serverless.start({"handler": handler})

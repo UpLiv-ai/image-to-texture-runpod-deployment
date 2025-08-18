@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument('--token', type=str, default=None)
     parser.add_argument('--stitch_mode', type=str, default='wmean', choices=['concat', 'mean', 'wmean'])
     parser.add_argument('--resolution', default=1024, choices=[512, 1024, 2048, 4096, 8192], type=int)
-    parser.add_argument('--prompt', type=str, default='p1', choices=['p1', 'p2', 'p3', 'p4'])
+    parser.add_argument('--prompt', type=str, default='p1')
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--renorm', action="store_true", default=False)
     parser.add_argument('--num_inference_steps', type=int, default=50)
@@ -66,7 +66,12 @@ def get_lora_sd_pipeline(
     from diffusers import StableDiffusionPipeline, AutoencoderKL
 
     # Define the path to your local VAE copy
-    vae_path = "/workspace/models/sd-vae-ft-mse"
+    if os.path.exists('/runpod-volume'):
+        base_volume_path = Path('/runpod-volume')
+    else:
+        base_volume_path = Path('/workspace')
+    
+    vae_path = base_volume_path / 'models' / 'sd-vae-ft-mse'
     
     # Load the new VAE
     vae = AutoencoderKL.from_pretrained(
@@ -136,15 +141,29 @@ def main(args):
 
     v_token = token
 
-    prompt = dict(
+    # Define the dictionary of preset prompt templates
+    prompt_templates = dict(
         p1='top view realistic texture of {}',
         p2='top view realistic {} texture',
         p3='masterpiece, best quality, a perfectly uniform grid of clean, white carrara marble hexagonal tiles, subtle and light gray veining, sharp and consistent grout lines, top-down orthographic view, no shadows',
         p4='realistic {} texture in top view',
-    )[args.prompt]
-    print(f'{args.prompt} => {prompt}')
-    v_prompt = prompt.replace(' ', '-').format('o')
-    prompt = prompt.format(token)
+    )
+
+    # Check if the user provided a preset key or a custom prompt string
+    if args.prompt in prompt_templates:
+        # It's a key, so get the template from the dictionary
+        prompt_template = prompt_templates[args.prompt]
+        print(f'Using predefined prompt key "{args.prompt}"')
+    else:
+        # It's not a key, so use the input string directly as the template
+        prompt_template = args.prompt
+        print(f'Using custom prompt string.')
+
+    print(f'Template => "{prompt_template}"')
+
+    # Use the selected template to format the final prompt and filename
+    v_prompt = prompt_template.replace(' ', '-').format('o')
+    prompt = prompt_template.format(token)
 
     # negative_prompt = "lowres, error, cropped, worst quality, low quality, jpeg artifacts, out of frame, watermark, signature, illustration, painting, drawing, art, sketch"
     negative_prompt = "blurry, merged tiles, missing tiles, broken grout, splotchy, noisy, chaotic texture, warped grid, distorted, discolored, ugly, jpeg artifacts, bad art, worst quality, low quality"

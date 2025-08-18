@@ -1,5 +1,7 @@
 import itertools
 import logging
+import os
+from pathlib import Path
 
 import torch
 import datasets
@@ -42,7 +44,12 @@ def load_models(args):
         text_encoder.print_trainable_parameters()
 
     # Replace the old VAE loading logic with this:
-    vae_path = "/workspace/models/sd-vae-ft-mse"
+    if os.path.exists('/runpod-volume'):
+        base_volume_path = Path('/runpod-volume')
+    else:
+        base_volume_path = Path('/workspace')
+    
+    vae_path = base_volume_path / 'models' / 'sd-vae-ft-mse'
     vae = AutoencoderKL.from_pretrained(
         vae_path,
         local_files_only=True,
